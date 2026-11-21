@@ -13,8 +13,11 @@ from .compilers.ddlcompiler import ClickHouseDDLCompiler
 from .compilers.sqlcompiler import ClickHouseSQLCompiler
 from .compilers.typecompiler import ClickHouseTypeCompiler
 from .reflection import ClickHouseInspector
-from .util import get_inner_spec, parse_arguments
+from .util import (
+    get_inner_spec, parse_arguments, parse_type_spec, _split_top_level
+)
 from .. import types
+from ..exceptions import TypeParseError
 
 # Column specifications
 colspecs = {}
@@ -226,26 +229,26 @@ class ClickHouseDialect(default.DefaultDialect):
 
     def _get_column_type(self, name, spec):
         if spec.startswith('Array'):
-            inner = spec[6:-1]
+            inner = get_inner_spec(spec)
             coltype = self.ischema_names['_array']
             return coltype(self._get_column_type(name, inner))
 
         elif spec.startswith('FixedString'):
-            length = int(spec[12:-1])
+            length = int(get_inner_spec(spec))
             return self.ischema_names['FixedString'](length)
 
         elif spec.startswith('Nullable'):
-            inner = spec[9:-1]
+            inner = get_inner_spec(spec)
             coltype = self.ischema_names['_nullable']
             return coltype(self._get_column_type(name, inner))
 
         elif spec.startswith('LowCardinality'):
-            inner = spec[15:-1]
+            inner = get_inner_spec(spec)
             coltype = self.ischema_names['_lowcardinality']
             return coltype(self._get_column_type(name, inner))
 
         elif spec.startswith('AggregateFunction'):
-            params = spec[18:-1]
+            params = get_inner_spec(spec)
 
             arguments = parse_arguments(params)
             agg_func, inner = arguments[0], arguments[1:]
@@ -258,7 +261,7 @@ class ClickHouseDialect(default.DefaultDialect):
             return coltype(agg_func, *inner_types)
 
         elif spec.startswith('SimpleAggregateFunction'):
-            params = spec[24:-1]
+            params = get_inner_spec(spec)
 
             arguments = parse_arguments(params)
             agg_func, inner = arguments[0], arguments[1:]
@@ -271,20 +274,31 @@ class ClickHouseDialect(default.DefaultDialect):
             return coltype(agg_func, *inner_types)
 
         elif spec.startswith('Tuple'):
-            inner = spec[6:-1]
             coltype = self.ischema_names['_tuple']
+            try:
+                elements = parse_type_spec(spec, column=name)
+            except TypeParseError as exc:
+                # The parser already reports the full spec; only the
+                # reflected column name may be missing on deep errors.
+                raise exc.with_context(column=name)
             inner_types = [
-                self._get_column_type(name, t.strip())
-                for t in inner.split(',')
+                self._parse_tuple_element(name, element)
+                for element in elements
             ]
             return coltype(*inner_types)
 
         elif spec.startswith('Map'):
-            inner = spec[4:-1]
             coltype = self.ischema_names['_map']
+            inner = get_inner_spec(spec)
+            # Bracket/quote aware split into exactly key and value types:
+            # the value type may itself be a Map, Tuple or parameterized
+            # Decimal, whose own commas must not split the pair.
+            try:
+                parts = self._split_map_types(inner, name)
+            except TypeParseError as exc:
+                raise exc.with_context(column=name, spec=spec)
             inner_types = [
-                self._get_column_type(name, t.strip())
-                for t in inner.split(',', 1)
+                self._get_column_type(name, part) for part in parts
             ]
             return coltype(*inner_types)
 
@@ -320,6 +334,23 @@ class ClickHouseDialect(default.DefaultDialect):
                 warn("Did not recognize type '%s' of column '%s'" %
                      (spec, name))
                 return sqltypes.NullType
+
+    def _parse_tuple_element(self, name, element):
+        if isinstance(element, tuple):
+            element_name, element_spec = element
+            return element_name, self._get_column_type(name, element_spec)
+        return self._get_column_type(name, element)
+
+    @staticmethod
+    def _split_map_types(inner, name):
+        parts = _split_top_level(inner, allow_empty=True)
+        if len(parts) != 2:
+            raise TypeParseError(
+                'Map type requires exactly two parameters (key type, '
+                'value type), got %d' % len(parts),
+                column=name, spec='Map(%s)' % inner,
+            )
+        return parts
 
     @staticmethod
     def _parse_decimal_params(spec):

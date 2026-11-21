@@ -1,6 +1,21 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Reflection and DDL generation for named ``Tuple`` types at every nesting
+  level. Element names, order and concrete subtypes (including ``Array``,
+  ``Map``, ``Nullable`` and precision-aware ``Decimal``) are preserved, and
+  quoted element names containing spaces or commas are parsed and re-quoted
+  by the dialect.
+
+### Fixed
+- Reflecting a named ``Tuple`` (or any ``Tuple``/``Map`` whose subtypes
+  contain commas) no longer degrades columns to ``NullType``. The type
+  string is now parsed with a bracket- and quote-aware parser.
+- Malformed reflected types (unbalanced parentheses, unterminated quotes,
+  mixed named/anonymous or duplicate ``Tuple`` element names) raise
+  ``TypeParseError`` naming the offending column instead of being silently
+  treated as unknown types.
 
 ## [0.3.2] - 2024-06-12
 ### Added

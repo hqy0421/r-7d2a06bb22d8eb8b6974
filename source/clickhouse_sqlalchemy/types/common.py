@@ -4,6 +4,8 @@ from sqlalchemy import types
 from sqlalchemy.sql.functions import Function
 from sqlalchemy.sql.type_api import to_instance
 
+from ..exceptions import TypeParseError
+
 
 class ClickHouseTypeEngine(types.TypeEngine):
     def compile(self, dialect=None):
@@ -197,8 +199,48 @@ class Tuple(ClickHouseTypeEngine):
     __visit_name__ = 'tuple'
 
     def __init__(self, *nested_types):
+        if not nested_types:
+            raise ValueError('Tuple must contain at least one element')
+        self._validate_nested_types(nested_types)
         self.nested_types = nested_types
         super(Tuple, self).__init__()
+
+    @staticmethod
+    def _validate_nested_types(nested_types):
+        # Named elements are passed as ``(name, type)`` tuples. A level
+        # must be fully named or fully anonymous and names must be unique.
+        named = [isinstance(element, tuple) for element in nested_types]
+        if any(named) and not all(named):
+            raise TypeParseError(
+                'Tuple elements must be either all named '
+                '(name, type) or all anonymous, got mixed elements: %s'
+                % (nested_types,)
+            )
+        if all(named):
+            bad = [
+                element for element in nested_types
+                if len(element) != 2 or not isinstance(element[0], str)
+            ]
+            if bad:
+                raise TypeParseError(
+                    'Named Tuple elements must be (name, type) pairs, got: %s'
+                    % (bad,)
+                )
+            names = [element[0] for element in nested_types]
+            duplicates = sorted({
+                name for name in names if names.count(name) > 1
+            })
+            if duplicates:
+                raise TypeParseError(
+                    'duplicate Tuple element name(s): %s'
+                    % ', '.join(repr(name) for name in duplicates)
+                )
+
+    @property
+    def is_named(self):
+        return all(
+            isinstance(element, tuple) for element in self.nested_types
+        )
 
 
 class Map(ClickHouseTypeEngine):
